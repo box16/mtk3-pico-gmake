@@ -20,24 +20,33 @@
 #include <tm/tmonitor.h>
 #include <bsp/libbsp.h>
 
-LOCAL void task_1(INT stacd, void *exinf);
-LOCAL ID	tskid_1;
-LOCAL T_CTSK	ctsk_1 = {
+LOCAL void task_get_temp(INT stacd, void *exinf);
+LOCAL ID	id_get_temp;
+LOCAL T_CTSK	ctsk_get_temp = {
 	.itskpri	= 10,
 	.stksz		= 1024,
-	.task		= task_1,
+	.task		= task_get_temp,
 	.tskatr		= TA_HLNG | TA_RNG3,
 };
 
-LOCAL void task_1(INT stacd, void *exinf)
+LOCAL void task_get_temp(INT stacd, void *exinf)
 {
-	/* P25 : On board LED*/
+	ID devid_iic = tk_opn_dev("iica", TD_UPDATE);
+	UB data[4];
+	SZ size;
+	ER error;
+	// 仕様書 : https://akizukidenshi.com/goodsaffix/Sensirion_Humidity_Sensors_SHT3x_DIS_Datasheet_V3_J.pdf
 	while(1) {
-		gpio_set_val(25,1);
-		tk_dly_tsk(500);
-
-		gpio_set_val(25,0);
-		tk_dly_tsk(500);
+		error = tk_swri_dev(devid_iic, 0x44, (UB[2]){0x24,0x00}, 2, &size);
+		tk_dly_tsk(15);// 測定待ち
+		error = tk_srea_dev(devid_iic, 0x44, data, 4, &size);
+		UH raw_temp = (data[0]<<8) | data[1];
+		H temp = (W)(175 * raw_temp) / 65535 - 45;
+		UH raw_humi = (data[2]<<8) | data[3];
+		H humi = (W)(100 * raw_humi) / 65535;
+		tm_printf((UB*)"temp: %d\n",temp);
+		tm_printf((UB*)"humi: %d\n",humi);
+		tk_dly_tsk(1000);
 	}
 }
 
@@ -45,8 +54,8 @@ EXPORT INT usermain(void)
 {
 	tm_printf((UB*)"User program started\n");
 
-	tskid_1 = tk_cre_tsk(&ctsk_1);
-	tk_sta_tsk(tskid_1, 0);
+	id_get_temp = tk_cre_tsk(&ctsk_get_temp);
+	tk_sta_tsk(id_get_temp, 0);
 
 	tk_slp_tsk(TMO_FEVR);
 	return 0;

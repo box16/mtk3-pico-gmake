@@ -25,45 +25,38 @@
 #define HCSR04_TIMER_NO			1
 #define HCSR04_ECHO_TIMEOUT_US		30000
 #define HCSR04_MEASURE_INTERVAL_MS	60
-#define HCSR04_SOUND_SPEED_MM_S		343000U
+#define HCSR04_SOUND_SPEED_MM_S		343000U // 常温での空気中の音速の近似値
 
 typedef struct {
 	UINT	timer_no;
 	volatile UW	wraps;
 	UW	max_count;
 	UW	clk_hz;
-} PtmrState;
+} Timer;
 
 typedef struct {
 	UINT	trig_gpio;
 	UINT	echo_gpio;
 	UW	echo_timeout_us;
-	PtmrState timer;
+	Timer timer;
 } Hcsr04Device;
 
-LOCAL Hcsr04Device hc_sr04 = {
-	.trig_gpio = HCSR04_TRIG_GPIO,
-	.echo_gpio = HCSR04_ECHO_GPIO,
-	.echo_timeout_us = HCSR04_ECHO_TIMEOUT_US,
-	.timer = {
-		.timer_no = HCSR04_TIMER_NO,
-	},
-};
-
-LOCAL void ptmr_overflow_handler(void *exinf)
+LOCAL void timer_overflow_handler(void *exinf)
 {
-	PtmrState *state = (PtmrState *)exinf;
+	// 物理タイマーがオーバーフローした際に、exinfで渡して置いたオーバーフローカウンタを進める
+	Timer *state = (Timer *)exinf;
 
 	state->wraps++;
 }
 
-LOCAL UD ptmr_get_ticks(const PtmrState *state)
+LOCAL UD timer_get_ticks(const Timer *state)
 {
 	UW count;
 	UW wraps_before;
 	UW wraps_after;
 
 	do {
+		// 読み込み中にオーバーフロー発生していないか確認するため、2回読み込む
 		wraps_before = state->wraps;
 		GetPhysicalTimerCount(state->timer_no, &count);
 		wraps_after = state->wraps;
@@ -72,18 +65,18 @@ LOCAL UD ptmr_get_ticks(const PtmrState *state)
 	return ((UD)wraps_before * ((UD)state->max_count + 1ULL)) + (UD)count;
 }
 
-LOCAL UD ptmr_usec_to_ticks(const PtmrState *state, UW usec)
+LOCAL UD timer_usec_to_ticks(const Timer *state, UW usec)
 {
 	return ((UD)usec * (UD)state->clk_hz) / 1000000ULL;
 }
 
-LOCAL UW hcsr04_ticks_to_mm(const PtmrState *state, UD ticks)
+LOCAL UW hcsr04_ticks_to_mm(const Timer *state, UD ticks)
 {
 	return (UW)((ticks * HCSR04_SOUND_SPEED_MM_S) /
 		    (2ULL * (UD)state->clk_hz));
 }
 
-LOCAL ER ptmr_start(PtmrState *state)
+LOCAL ER timer_start(Timer *state)
 {
 	T_RPTMR config;
 	T_DPTMR handler;
@@ -100,7 +93,7 @@ LOCAL ER ptmr_start(PtmrState *state)
 
 	handler.exinf = state;
 	handler.ptmratr = TA_HLNG;
-	handler.ptmrhdr = (FP)ptmr_overflow_handler;
+	handler.ptmrhdr = (FP)timer_overflow_handler;
 	er = DefinePhysicalTimerHandler(state->timer_no, &handler);
 	if (er != E_OK) {
 		return er;
@@ -109,26 +102,30 @@ LOCAL ER ptmr_start(PtmrState *state)
 	return StartPhysicalTimer(state->timer_no, state->max_count, TA_CYC_PTMR);
 }
 
+/*
+指定したlevelになるまで、待機する(ただし上限はtimeout_ticks)
+*/
 LOCAL ER hcsr04_wait_echo_level(const Hcsr04Device *device, UINT level,
 				UD timeout_ticks, UD *timestamp)
 {
 	UD start;
 
-	start = ptmr_get_ticks(&device->timer);
+	start = timer_get_ticks(&device->timer);
 	while (gpio_get_val(device->echo_gpio) != level) {
-		if ((ptmr_get_ticks(&device->timer) - start) > timeout_ticks) {
+		if ((timer_get_ticks(&device->timer) - start) > timeout_ticks) {
 			return E_TMOUT;
 		}
 	}
 
 	if (timestamp != NULL) {
-		*timestamp = ptmr_get_ticks(&device->timer);
+		*timestamp = timer_get_ticks(&device->timer);
 	}
 	return E_OK;
 }
 
 LOCAL void hcsr04_trigger(const Hcsr04Device *device)
 {
+	// トリガーパルス生成. 10us以上Highにする必要がある
 	gpio_set_val(device->trig_gpio, 0);
 	WaitUsec(2);
 	gpio_set_val(device->trig_gpio, 1);
@@ -142,7 +139,7 @@ LOCAL ER hcsr04_init(Hcsr04Device *device)
 	gpio_set_pin(device->echo_gpio, GPIO_MODE_IN);
 	gpio_set_val(device->trig_gpio, 0);
 
-	return ptmr_start(&device->timer);
+	return timer_start(&device->timer);
 }
 
 LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *distance_mm)
@@ -153,8 +150,8 @@ LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *distance_mm)
 	UD pulse_ticks;
 	ER er;
 
-	timeout_ticks = ptmr_usec_to_ticks(&device->timer,
-					   device->echo_timeout_us);
+	timeout_ticks = timer_usec_to_ticks(&device->timer, device->echo_timeout_us);
+	// Echoが0であることを確認 = 前回の測定が終了していることを確認
 	er = hcsr04_wait_echo_level(device, 0, timeout_ticks, NULL);
 	if (er != E_OK) {
 		return er;
@@ -162,10 +159,12 @@ LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *distance_mm)
 
 	hcsr04_trigger(device);
 
+	// 超音波音の跳ね返りを検出
 	er = hcsr04_wait_echo_level(device, 1, timeout_ticks, &start_ticks);
 	if (er != E_OK) {
 		return er;
 	}
+	// 超音波の跳ね返りが終了するのを待機
 	er = hcsr04_wait_echo_level(device, 0, timeout_ticks, &end_ticks);
 	if (er != E_OK) {
 		return er;
@@ -192,6 +191,15 @@ LOCAL void task_1(INT stacd, void *exinf)
 	ER er;
 	UW distance_mm;
 
+	Hcsr04Device hc_sr04 = {
+		.trig_gpio = HCSR04_TRIG_GPIO,
+		.echo_gpio = HCSR04_ECHO_GPIO,
+		.echo_timeout_us = HCSR04_ECHO_TIMEOUT_US, // TODO : タイムアウトではなく測定限界範囲にしておきたい
+		.timer = {
+			.timer_no = HCSR04_TIMER_NO,
+		},
+	};
+
 	er = hcsr04_init(&hc_sr04);
 	if (er != E_OK) {
 		tm_printf((UB*)"PTMR init failed: %d\n", er);
@@ -207,6 +215,8 @@ LOCAL void task_1(INT stacd, void *exinf)
 		}
 		tk_dly_tsk(HCSR04_MEASURE_INTERVAL_MS);
 	}
+
+	tk_ext_tsk();
 }
 
 EXPORT INT usermain(void)

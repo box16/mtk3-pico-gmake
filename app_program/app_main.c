@@ -23,9 +23,10 @@
 #define HCSR04_TRIG_GPIO		16
 #define HCSR04_ECHO_GPIO		17
 #define HCSR04_TIMER_NO			1
-#define HCSR04_ECHO_TIMEOUT_US		30000
-#define HCSR04_MEASURE_INTERVAL_MS	60
+#define HCSR04_MAX_DISTANCE_MM		1500U
+#define HCSR04_MEASURE_INTERVAL_MS	250
 #define HCSR04_SOUND_SPEED_MM_S		343000U // 常温での空気中の音速の近似値
+#define HCSR04_PULSE_READY_TIMEOUT_US	3000U
 
 typedef struct {
 	UINT	timer_no;
@@ -37,7 +38,7 @@ typedef struct {
 typedef struct {
 	UINT	trig_gpio;
 	UINT	echo_gpio;
-	UW	echo_timeout_us;
+	UW	max_distance_mm;
 	Timer timer;
 } Hcsr04Device;
 
@@ -76,6 +77,12 @@ LOCAL UW hcsr04_ticks_to_mm(const Timer *state, UD ticks)
 		    (2ULL * (UD)state->clk_hz));
 }
 
+LOCAL UD hcsr04_distance_mm_to_ticks(const Hcsr04Device *device, UW distance_mm)
+{
+	return ((UD)distance_mm * 2ULL * (UD)device->timer.clk_hz) /
+	       HCSR04_SOUND_SPEED_MM_S;
+}
+
 LOCAL ER timer_start(Timer *state)
 {
 	T_RPTMR config;
@@ -102,9 +109,7 @@ LOCAL ER timer_start(Timer *state)
 	return StartPhysicalTimer(state->timer_no, state->max_count, TA_CYC_PTMR);
 }
 
-/*
-指定したlevelになるまで、待機する(ただし上限はtimeout_ticks)
-*/
+/* Wait until echo reaches level, with timeout. */
 LOCAL ER hcsr04_wait_echo_level(const Hcsr04Device *device, UINT level,
 				UD timeout_ticks, UD *timestamp)
 {
@@ -145,26 +150,28 @@ LOCAL ER hcsr04_init(Hcsr04Device *device)
 LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *distance_mm)
 {
 	UD timeout_ticks;
+	UD ready_timeout_ticks;
 	UD start_ticks;
 	UD end_ticks;
 	UD pulse_ticks;
 	ER er;
 
-	timeout_ticks = timer_usec_to_ticks(&device->timer, device->echo_timeout_us);
-	// Echoが0であることを確認 = 前回の測定が終了していることを確認
-	er = hcsr04_wait_echo_level(device, 0, timeout_ticks, NULL);
+	ready_timeout_ticks = timer_usec_to_ticks(&device->timer,
+						  HCSR04_PULSE_READY_TIMEOUT_US);
+	er = hcsr04_wait_echo_level(device, 0, ready_timeout_ticks, NULL);
 	if (er != E_OK) {
 		return er;
 	}
 
 	hcsr04_trigger(device);
 
-	// 超音波音の跳ね返りを検出
-	er = hcsr04_wait_echo_level(device, 1, timeout_ticks, &start_ticks);
+	er = hcsr04_wait_echo_level(device, 1, ready_timeout_ticks, &start_ticks);
 	if (er != E_OK) {
 		return er;
 	}
-	// 超音波の跳ね返りが終了するのを待機
+
+	timeout_ticks = hcsr04_distance_mm_to_ticks(device,
+						    device->max_distance_mm);
 	er = hcsr04_wait_echo_level(device, 0, timeout_ticks, &end_ticks);
 	if (er != E_OK) {
 		return er;
@@ -194,7 +201,7 @@ LOCAL void task_1(INT stacd, void *exinf)
 	Hcsr04Device hc_sr04 = {
 		.trig_gpio = HCSR04_TRIG_GPIO,
 		.echo_gpio = HCSR04_ECHO_GPIO,
-		.echo_timeout_us = HCSR04_ECHO_TIMEOUT_US, // TODO : タイムアウトではなく測定限界範囲にしておきたい
+		.max_distance_mm = HCSR04_MAX_DISTANCE_MM,
 		.timer = {
 			.timer_no = HCSR04_TIMER_NO,
 		},
@@ -211,7 +218,7 @@ LOCAL void task_1(INT stacd, void *exinf)
 		if (er == E_OK) {
 			tm_printf((UB*)"Distance %lu mm\n", (UW)distance_mm);
 		} else {
-			tm_printf((UB*)"Echo timeout (%d)\n", er);
+			// 測定範囲内に物体がない場合など、測定失敗
 		}
 		tk_dly_tsk(HCSR04_MEASURE_INTERVAL_MS);
 	}

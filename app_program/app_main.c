@@ -20,106 +20,138 @@
 #include <tm/tmonitor.h>
 #include <bsp/libbsp.h>
 
-#define HC_SR04_TRIG_GPIO	16
-#define HC_SR04_ECHO_GPIO	17
-#define LED_GPIO		25
-#define HC_SR04_PTMR_NO		1
-#define HC_SR04_ECHO_TIMEOUT_US	30000
-#define HC_SR04_MEASURE_INTERVAL_MS	60
+#define HCSR04_TRIG_GPIO		16
+#define HCSR04_ECHO_GPIO		17
+#define STATUS_LED_GPIO			25
+#define HCSR04_TIMER_NO			1
+#define HCSR04_ECHO_TIMEOUT_US		30000
+#define HCSR04_MEASURE_INTERVAL_MS	60
+#define HCSR04_SOUND_SPEED_MM_S		343000U
 
-LOCAL volatile UW g_ptmr_overflow;
-LOCAL UW g_ptmr_limit;
-LOCAL UW g_ptmr_clk;
+typedef struct {
+	UINT	timer_no;
+	volatile UW	wraps;
+	UW	max_count;
+	UW	clk_hz;
+} PtmrState;
 
-LOCAL void ptmr_wrap_handler(void *exinf)
+typedef struct {
+	UINT	trig_gpio;
+	UINT	echo_gpio;
+	UW	echo_timeout_us;
+	PtmrState timer;
+} Hcsr04Device;
+
+LOCAL Hcsr04Device hc_sr04 = {
+	.trig_gpio = HCSR04_TRIG_GPIO,
+	.echo_gpio = HCSR04_ECHO_GPIO,
+	.echo_timeout_us = HCSR04_ECHO_TIMEOUT_US,
+	.timer = {
+		.timer_no = HCSR04_TIMER_NO,
+	},
+};
+
+LOCAL void ptmr_overflow_handler(void *exinf)
 {
-	(void)exinf;
-	g_ptmr_overflow++;
+	PtmrState *state = (PtmrState *)exinf;
+
+	state->wraps++;
 }
 
-LOCAL UD get_ptmr_ticks(void)
+LOCAL UD ptmr_get_ticks(const PtmrState *state)
 {
-	UW	count;
-	UW	of_before;
-	UW	of_after;
+	UW count;
+	UW wraps_before;
+	UW wraps_after;
 
 	do {
-		of_before = g_ptmr_overflow;
-		GetPhysicalTimerCount(HC_SR04_PTMR_NO, &count);
-		of_after = g_ptmr_overflow;
-	} while (of_before != of_after);
+		wraps_before = state->wraps;
+		GetPhysicalTimerCount(state->timer_no, &count);
+		wraps_after = state->wraps;
+	} while (wraps_before != wraps_after);
 
-	return ((UD)of_before * ((UD)g_ptmr_limit + 1ULL)) + (UD)count;
+	return ((UD)wraps_before * ((UD)state->max_count + 1ULL)) + (UD)count;
 }
 
-LOCAL UD usec_to_ticks(UW usec)
+LOCAL UD ptmr_usec_to_ticks(const PtmrState *state, UW usec)
 {
-	return ((UD)usec * (UD)g_ptmr_clk) / 1000000ULL;
+	return ((UD)usec * (UD)state->clk_hz) / 1000000ULL;
 }
 
-LOCAL UW ticks_to_usec(UD ticks)
+LOCAL UW ptmr_ticks_to_usec(const PtmrState *state, UD ticks)
 {
-	return (UW)((ticks * 1000000ULL) / (UD)g_ptmr_clk);
+	return (UW)((ticks * 1000000ULL) / (UD)state->clk_hz);
 }
 
-LOCAL UW ticks_to_mm(UD ticks)
+LOCAL UW hcsr04_ticks_to_mm(const PtmrState *state, UD ticks)
 {
-	return (UW)((ticks * 343000ULL) / (2ULL * (UD)g_ptmr_clk));
+	return (UW)((ticks * HCSR04_SOUND_SPEED_MM_S) /
+		    (2ULL * (UD)state->clk_hz));
 }
 
-LOCAL ER wait_echo_state(UINT state, UD timeout_ticks, UD *timestamp)
+LOCAL ER ptmr_start(PtmrState *state)
+{
+	T_RPTMR config;
+	T_DPTMR handler;
+	ER er;
+
+	er = GetPhysicalTimerConfig(state->timer_no, &config);
+	if (er != E_OK) {
+		return er;
+	}
+
+	state->max_count = config.maxcount;
+	state->clk_hz = config.ptmrclk;
+	state->wraps = 0;
+
+	handler.exinf = state;
+	handler.ptmratr = TA_HLNG;
+	handler.ptmrhdr = (FP)ptmr_overflow_handler;
+	er = DefinePhysicalTimerHandler(state->timer_no, &handler);
+	if (er != E_OK) {
+		return er;
+	}
+
+	return StartPhysicalTimer(state->timer_no, state->max_count, TA_CYC_PTMR);
+}
+
+LOCAL ER hcsr04_wait_echo_level(const Hcsr04Device *device, UINT level,
+				UD timeout_ticks, UD *timestamp)
 {
 	UD start;
 
-	start = get_ptmr_ticks();
-	while (gpio_get_val(HC_SR04_ECHO_GPIO) != state) {
-		if ((get_ptmr_ticks() - start) > timeout_ticks) {
+	start = ptmr_get_ticks(&device->timer);
+	while (gpio_get_val(device->echo_gpio) != level) {
+		if ((ptmr_get_ticks(&device->timer) - start) > timeout_ticks) {
 			return E_TMOUT;
 		}
 	}
 
 	if (timestamp != NULL) {
-		*timestamp = get_ptmr_ticks();
+		*timestamp = ptmr_get_ticks(&device->timer);
 	}
 	return E_OK;
 }
 
-LOCAL ER init_hcsr04_timer(void)
+LOCAL void hcsr04_trigger(const Hcsr04Device *device)
 {
-	T_RPTMR rptmr;
-	T_DPTMR dptmr;
-	ER er;
-
-	er = GetPhysicalTimerConfig(HC_SR04_PTMR_NO, &rptmr);
-	if (er != E_OK) {
-		return er;
-	}
-
-	g_ptmr_limit = rptmr.maxcount;
-	g_ptmr_clk = rptmr.ptmrclk;
-	g_ptmr_overflow = 0;
-
-	dptmr.exinf = NULL;
-	dptmr.ptmratr = TA_HLNG;
-	dptmr.ptmrhdr = (FP)ptmr_wrap_handler;
-	er = DefinePhysicalTimerHandler(HC_SR04_PTMR_NO, &dptmr);
-	if (er != E_OK) {
-		return er;
-	}
-
-	return StartPhysicalTimer(HC_SR04_PTMR_NO, g_ptmr_limit, TA_CYC_PTMR);
-}
-
-LOCAL void hcsr04_trigger(void)
-{
-	gpio_set_val(HC_SR04_TRIG_GPIO, 0);
+	gpio_set_val(device->trig_gpio, 0);
 	WaitUsec(2);
-	gpio_set_val(HC_SR04_TRIG_GPIO, 1);
+	gpio_set_val(device->trig_gpio, 1);
 	WaitUsec(10);
-	gpio_set_val(HC_SR04_TRIG_GPIO, 0);
+	gpio_set_val(device->trig_gpio, 0);
 }
 
-LOCAL ER hcsr04_measure(UW *time_us, UW *distance_mm)
+LOCAL ER hcsr04_init(Hcsr04Device *device)
+{
+	gpio_set_pin(device->trig_gpio, GPIO_MODE_OUT);
+	gpio_set_pin(device->echo_gpio, GPIO_MODE_IN);
+	gpio_set_val(device->trig_gpio, 0);
+
+	return ptmr_start(&device->timer);
+}
+
+LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *pulse_us, UW *distance_mm)
 {
 	UD timeout_ticks;
 	UD start_ticks;
@@ -127,29 +159,30 @@ LOCAL ER hcsr04_measure(UW *time_us, UW *distance_mm)
 	UD pulse_ticks;
 	ER er;
 
-	timeout_ticks = usec_to_ticks(HC_SR04_ECHO_TIMEOUT_US);
-	er = wait_echo_state(0, timeout_ticks, NULL);
+	timeout_ticks = ptmr_usec_to_ticks(&device->timer,
+					   device->echo_timeout_us);
+	er = hcsr04_wait_echo_level(device, 0, timeout_ticks, NULL);
 	if (er != E_OK) {
 		return er;
 	}
 
-	hcsr04_trigger();
+	hcsr04_trigger(device);
 
-	er = wait_echo_state(1, timeout_ticks, &start_ticks);
+	er = hcsr04_wait_echo_level(device, 1, timeout_ticks, &start_ticks);
 	if (er != E_OK) {
 		return er;
 	}
-	er = wait_echo_state(0, timeout_ticks, &end_ticks);
+	er = hcsr04_wait_echo_level(device, 0, timeout_ticks, &end_ticks);
 	if (er != E_OK) {
 		return er;
 	}
 
 	pulse_ticks = end_ticks - start_ticks;
-	if (time_us != NULL) {
-		*time_us = ticks_to_usec(pulse_ticks);
+	if (pulse_us != NULL) {
+		*pulse_us = ptmr_ticks_to_usec(&device->timer, pulse_ticks);
 	}
 	if (distance_mm != NULL) {
-		*distance_mm = ticks_to_mm(pulse_ticks);
+		*distance_mm = hcsr04_ticks_to_mm(&device->timer, pulse_ticks);
 	}
 	return E_OK;
 }
@@ -166,33 +199,33 @@ LOCAL T_CTSK	ctsk_1 = {
 LOCAL void task_1(INT stacd, void *exinf)
 {
 	ER er;
-	UW time_us;
+	UW pulse_us;
 	UW distance_mm;
-	UINT led = 0;
+	UINT led_state = 0;
 
-	gpio_set_pin(HC_SR04_TRIG_GPIO, GPIO_MODE_OUT);
-	gpio_set_pin(HC_SR04_ECHO_GPIO, GPIO_MODE_IN);
-	gpio_set_pin(LED_GPIO, GPIO_MODE_OUT);
-	gpio_set_val(HC_SR04_TRIG_GPIO, 0);
+	(void)stacd;
+	(void)exinf;
 
-	er = init_hcsr04_timer();
+	gpio_set_pin(STATUS_LED_GPIO, GPIO_MODE_OUT);
+
+	er = hcsr04_init(&hc_sr04);
 	if (er != E_OK) {
 		tm_printf((UB*)"PTMR init failed: %d\n", er);
 		tk_slp_tsk(TMO_FEVR);
 	}
 
 	while(1) {
-		er = hcsr04_measure(&time_us, &distance_mm);
+		er = hcsr04_measure(&hc_sr04, &pulse_us, &distance_mm);
 		if (er == E_OK) {
 			tm_printf((UB*)"Echo %lu us, Distance %lu mm\n",
-				  (UW)time_us, (UW)distance_mm);
+				  (UW)pulse_us, (UW)distance_mm);
 		} else {
 			tm_printf((UB*)"Echo timeout (%d)\n", er);
 		}
 
-		led ^= 1;
-		gpio_set_val(LED_GPIO, led);
-		tk_dly_tsk(HC_SR04_MEASURE_INTERVAL_MS);
+		led_state ^= 1;
+		gpio_set_val(STATUS_LED_GPIO, led_state);
+		tk_dly_tsk(HCSR04_MEASURE_INTERVAL_MS);
 	}
 }
 

@@ -22,7 +22,6 @@
 
 #define HCSR04_TRIG_GPIO		16
 #define HCSR04_ECHO_GPIO		17
-#define STATUS_LED_GPIO			25
 #define HCSR04_TIMER_NO			1
 #define HCSR04_ECHO_TIMEOUT_US		30000
 #define HCSR04_MEASURE_INTERVAL_MS	60
@@ -76,11 +75,6 @@ LOCAL UD ptmr_get_ticks(const PtmrState *state)
 LOCAL UD ptmr_usec_to_ticks(const PtmrState *state, UW usec)
 {
 	return ((UD)usec * (UD)state->clk_hz) / 1000000ULL;
-}
-
-LOCAL UW ptmr_ticks_to_usec(const PtmrState *state, UD ticks)
-{
-	return (UW)((ticks * 1000000ULL) / (UD)state->clk_hz);
 }
 
 LOCAL UW hcsr04_ticks_to_mm(const PtmrState *state, UD ticks)
@@ -151,7 +145,7 @@ LOCAL ER hcsr04_init(Hcsr04Device *device)
 	return ptmr_start(&device->timer);
 }
 
-LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *pulse_us, UW *distance_mm)
+LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *distance_mm)
 {
 	UD timeout_ticks;
 	UD start_ticks;
@@ -178,9 +172,6 @@ LOCAL ER hcsr04_measure(const Hcsr04Device *device, UW *pulse_us, UW *distance_m
 	}
 
 	pulse_ticks = end_ticks - start_ticks;
-	if (pulse_us != NULL) {
-		*pulse_us = ptmr_ticks_to_usec(&device->timer, pulse_ticks);
-	}
 	if (distance_mm != NULL) {
 		*distance_mm = hcsr04_ticks_to_mm(&device->timer, pulse_ticks);
 	}
@@ -199,14 +190,7 @@ LOCAL T_CTSK	ctsk_1 = {
 LOCAL void task_1(INT stacd, void *exinf)
 {
 	ER er;
-	UW pulse_us;
 	UW distance_mm;
-	UINT led_state = 0;
-
-	(void)stacd;
-	(void)exinf;
-
-	gpio_set_pin(STATUS_LED_GPIO, GPIO_MODE_OUT);
 
 	er = hcsr04_init(&hc_sr04);
 	if (er != E_OK) {
@@ -215,16 +199,12 @@ LOCAL void task_1(INT stacd, void *exinf)
 	}
 
 	while(1) {
-		er = hcsr04_measure(&hc_sr04, &pulse_us, &distance_mm);
+		er = hcsr04_measure(&hc_sr04, &distance_mm);
 		if (er == E_OK) {
-			tm_printf((UB*)"Echo %lu us, Distance %lu mm\n",
-				  (UW)pulse_us, (UW)distance_mm);
+			tm_printf((UB*)"Distance %lu mm\n", (UW)distance_mm);
 		} else {
 			tm_printf((UB*)"Echo timeout (%d)\n", er);
 		}
-
-		led_state ^= 1;
-		gpio_set_val(STATUS_LED_GPIO, led_state);
 		tk_dly_tsk(HCSR04_MEASURE_INTERVAL_MS);
 	}
 }

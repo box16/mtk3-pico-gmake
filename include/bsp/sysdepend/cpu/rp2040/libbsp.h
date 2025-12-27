@@ -32,5 +32,6 @@ ER	pwm_set_pin(UINT no);			// Set PWM output pin
 ER	pwm_set_wrap(UINT no, UW wrap);		// Set counter wrap value
 ER	pwm_set_cc(UINT no, UW cc);		// Set counter compare value
 ER	pwm_set_enabled(UINT no, BOOL enable);	// Enable/Disable chanel
+ER pwm_set_div(UINT no, UW div_int, UW div_frac_16);       // Set clock divider
 
 #endif	/* __BSP_LIBBSP_DEPEND_CPU_H__ */

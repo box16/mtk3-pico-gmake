@@ -49,6 +49,7 @@ include pico_rp2040.mk
 endif
 
 -include mtkernel_3/app_program/subdir.mk
+-include mtkernel_3/module/subdir.mk
 
 ifneq ($(MAKECMDGOALS),clean)
 ifneq ($(strip $(ASM_DEPS)),)

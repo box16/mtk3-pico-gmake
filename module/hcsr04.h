@@ -1,5 +1,6 @@
 /*
  * HC-SR04 ultrasonic sensor module
+ * https://cdn.sparkfun.com/datasheets/Sensors/Proximity/HCSR04.pdf
  */
 
 #ifndef MODULE_HCSR04_H

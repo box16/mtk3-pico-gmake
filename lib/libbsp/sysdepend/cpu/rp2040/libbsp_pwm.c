@@ -130,4 +130,15 @@ ER pwm_set_enabled(UINT no, BOOL enable)
 	return	E_OK;
 }
 
+ER pwm_set_div(UINT no, UW div_int, UW div_frac_16)
+{
+    if(no >= GPIO_NUM) return E_PAR;
+    if(div_int < 1 || div_int > 255) return E_PAR;
+    if(div_frac_16 > 15) return E_PAR;
+
+    UW div_reg = (div_int << 4) | (div_frac_16 & 0x0F);
+    out_w(PWM_CH_DIV(PWM_GET_CHNO(no)), div_reg);
+    return E_OK;
+}
+
 #endif /* CPU_RP2040 */

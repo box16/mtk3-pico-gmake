@@ -19,51 +19,53 @@
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
 
-#include "../module/hcsr04.h"
+#include "../module/sg90.h"
 
-#define HCSR04_TRIG_GPIO		16
-#define HCSR04_ECHO_GPIO		17
-#define HCSR04_TIMER_NO			1
-#define HCSR04_MAX_DISTANCE_MM		1500U
-#define HCSR04_MEASURE_INTERVAL_MS	250
+#define SERVO_PWM_GPIO		18
+#define SERVO_STEP_DEG		10
+#define SERVO_STEP_WAIT_MS	100
 
-LOCAL void task_1(INT stacd, void *exinf);
-LOCAL ID	tskid_1;
-LOCAL T_CTSK	ctsk_1 = {
+
+LOCAL void servo_task(INT stacd, void *exinf);
+LOCAL ID	tskid_servo;
+LOCAL T_CTSK	ctsk_servo = {
 	.itskpri	= 10,
 	.stksz		= 1024,
-	.task		= task_1,
+	.task		= servo_task,
 	.tskatr		= TA_HLNG | TA_RNG3,
 };
 
-LOCAL void task_1(INT stacd, void *exinf)
+LOCAL void servo_task(INT stacd, void *exinf)
 {
 	ER er;
-	UW distance_mm;
-	Timer hcsr04_timer = {
-		.timer_no = HCSR04_TIMER_NO,
-	};
-	Hcsr04Device hcsr04 = {
-		.trig_gpio = HCSR04_TRIG_GPIO,
-		.echo_gpio = HCSR04_ECHO_GPIO,
-		.max_distance_mm = HCSR04_MAX_DISTANCE_MM,
-		.timer = &hcsr04_timer,
-	};
-
-	er = hcsr04_init(&hcsr04);
+	er = sg90_init(SERVO_PWM_GPIO);
 	if (er != E_OK) {
-		tm_printf((UB*)"PTMR init failed: %d\n", er);
+		tm_printf((UB*)"PWM init failed: %d\n", er);
 		tk_slp_tsk(TMO_FEVR);
 	}
 
+	tm_printf((UB*)"Servo PWM started on GPIO %d\n", SERVO_PWM_GPIO);
+
 	while (1) {
-		er = hcsr04_measure(&hcsr04, &distance_mm);
-		if (er == E_OK) {
-			tm_printf((UB*)"Distance %lu mm\n", (UW)distance_mm);
-		} else {
-			tm_printf((UB*)"Echo timeout (%d)\n", er);
+		INT angle;
+
+		for (angle = -SERVO_ANGLE_MAX; angle <= SERVO_ANGLE_MAX; angle += SERVO_STEP_DEG) {
+			er = sg90_set_angle(SERVO_PWM_GPIO, angle);
+			if (er != E_OK) {
+				tm_printf((UB*)"PWM set failed: %d\n", er);
+				tk_slp_tsk(TMO_FEVR);
+			}
+			tk_dly_tsk(SERVO_STEP_WAIT_MS);
 		}
-		tk_dly_tsk(HCSR04_MEASURE_INTERVAL_MS);
+
+		for (angle = SERVO_ANGLE_MAX; angle >= -SERVO_ANGLE_MAX; angle -= SERVO_STEP_DEG) {
+			er = sg90_set_angle(SERVO_PWM_GPIO, angle);
+			if (er != E_OK) {
+				tm_printf((UB*)"PWM set failed: %d\n", er);
+				tk_slp_tsk(TMO_FEVR);
+			}
+			tk_dly_tsk(SERVO_STEP_WAIT_MS);
+		}
 	}
 }
 
@@ -71,8 +73,8 @@ EXPORT INT usermain(void)
 {
 	tm_printf((UB*)"User program started\n");
 
-	tskid_1 = tk_cre_tsk(&ctsk_1);
-	tk_sta_tsk(tskid_1, 0);
+	tskid_servo = tk_cre_tsk(&ctsk_servo);
+	tk_sta_tsk(tskid_servo, 0);
 
 	tk_slp_tsk(TMO_FEVR);
 	return 0;

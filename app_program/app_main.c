@@ -1,81 +1,65 @@
 /*
  *----------------------------------------------------------------------
- *    micro T-Kernel 3.0 BSP
- *
- *    Copyright (C) 2022-2023 by Ken Sakamura.
- *    This software is distributed under the T-License 2.2.
+ *    micro T-Kernel 3.0 BSP  (RaspberryPi Pico / RP2040)
  *----------------------------------------------------------------------
- *
- *    Released by TRON Forum(http://www.tron.org) at 2023/05.
- *
- *----------------------------------------------------------------------
- */
-
-/*
- *	app_main.c
- *	Application main program for RaspberryPi Pico
  */
 
 #include <tk/tkernel.h>
 #include <tm/tmonitor.h>
+#include "../module/motor.h"
 
-#include "../module/sg90.h"
-
-#define SERVO_PWM_GPIO		18
-#define SERVO_STEP_DEG		10
-#define SERVO_STEP_WAIT_MS	100
-
-
-LOCAL void servo_task(INT stacd, void *exinf);
-LOCAL ID	tskid_servo;
-LOCAL T_CTSK	ctsk_servo = {
-	.itskpri	= 10,
-	.stksz		= 1024,
-	.task		= servo_task,
-	.tskatr		= TA_HLNG | TA_RNG3,
+LOCAL const MotorPins motor_pins = {
+    .a_in1 = 16,
+    .a_in2 = 17,
+    .b_in1 = 18,
+    .b_in2 = 19,
 };
 
-LOCAL void servo_task(INT stacd, void *exinf)
+LOCAL void motor_task(INT stacd, void *exinf);
+LOCAL ID tskid_motor;
+
+LOCAL T_CTSK ctsk_motor = {
+    .itskpri = 10,
+    .stksz   = 1024,
+    .task    = motor_task,
+    .tskatr  = TA_HLNG | TA_RNG3,
+};
+
+LOCAL void motor_task(INT stacd, void *exinf)
 {
-	ER er;
-	er = sg90_init(SERVO_PWM_GPIO);
-	if (er != E_OK) {
-		tm_printf((UB*)"PWM init failed: %d\n", er);
-		tk_slp_tsk(TMO_FEVR);
-	}
+    ER er;
 
-	tm_printf((UB*)"Servo PWM started on GPIO %d\n", SERVO_PWM_GPIO);
+    er = motor_init(&motor_pins);
+    if (er != E_OK) {
+        tm_printf((UB*)"motor_init failed: %d\n", er);
+        tk_slp_tsk(TMO_FEVR);
+        return;
+    }
 
-	while (1) {
-		INT angle;
+    while (1) {
+        motor_set(MOTOR_CMD_FORWARD, 100);
+        tk_dly_tsk(2000);
 
-		for (angle = -SERVO_ANGLE_MAX; angle <= SERVO_ANGLE_MAX; angle += SERVO_STEP_DEG) {
-			er = sg90_set_angle(SERVO_PWM_GPIO, angle);
-			if (er != E_OK) {
-				tm_printf((UB*)"PWM set failed: %d\n", er);
-				tk_slp_tsk(TMO_FEVR);
-			}
-			tk_dly_tsk(SERVO_STEP_WAIT_MS);
-		}
+        motor_set(MOTOR_CMD_BACK, 100);
+        tk_dly_tsk(2000);
 
-		for (angle = SERVO_ANGLE_MAX; angle >= -SERVO_ANGLE_MAX; angle -= SERVO_STEP_DEG) {
-			er = sg90_set_angle(SERVO_PWM_GPIO, angle);
-			if (er != E_OK) {
-				tm_printf((UB*)"PWM set failed: %d\n", er);
-				tk_slp_tsk(TMO_FEVR);
-			}
-			tk_dly_tsk(SERVO_STEP_WAIT_MS);
-		}
-	}
+        motor_set(MOTOR_CMD_LEFT, 100);
+        tk_dly_tsk(2000);
+
+        motor_set(MOTOR_CMD_RIGHT, 100);
+        tk_dly_tsk(2000);
+
+        motor_set(MOTOR_CMD_STOP, 0);
+        tk_dly_tsk(2000);
+    }
 }
-
 EXPORT INT usermain(void)
 {
-	tm_printf((UB*)"User program started\n");
+    tm_printf((UB*)"User program started\n");
 
-	tskid_servo = tk_cre_tsk(&ctsk_servo);
-	tk_sta_tsk(tskid_servo, 0);
+    tskid_motor = tk_cre_tsk(&ctsk_motor);
+    tk_sta_tsk(tskid_motor, 0);
 
-	tk_slp_tsk(TMO_FEVR);
-	return 0;
+    tk_slp_tsk(TMO_FEVR);
+    return 0;
 }
